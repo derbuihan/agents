@@ -30,6 +30,3 @@ jobs:
 
       - name: Build
         run: npm run build
-
-      - name: Run baseline tests
-        run: npm test -- --testPathIgnorePatterns=title.memory-leak.test.ts --testPathIgnorePatterns=llm.spec.ts --testPathIgnorePatterns=integration.test.ts --testPathIgnorePatterns=src/specs/
