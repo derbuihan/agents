@@ -12,6 +12,7 @@ permissions:
 
 jobs:
   publish:
+    if: github.repository_owner == 'danny-avila'
     runs-on: ubuntu-latest
     environment: publish  # Must match npm trusted publisher config
     steps:

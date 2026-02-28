@@ -1,0 +1,128 @@
+name: upstream-sync
+
+on:
+  schedule:
+    - cron: '0 2 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: upstream-sync-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream and origin
+        run: |
+          git remote add upstream https://github.com/danny-avila/agents.git
+          git fetch upstream main --prune
+          git fetch origin main --prune
+
+      - name: Update upstream-main mirror
+        run: |
+          if git show-ref --verify --quiet refs/remotes/origin/upstream-main; then
+            git checkout -B upstream-main origin/upstream-main
+            git merge --ff-only upstream/main
+          else
+            git checkout -B upstream-main upstream/main
+          fi
+          git push origin upstream-main
+
+      - name: Merge upstream-main into weekly sync branch
+        id: merge_step
+        run: |
+          SYNC_BRANCH="sync/upstream-$(date -u +'%G%V')"
+          echo "sync_branch=${SYNC_BRANCH}" >> "$GITHUB_OUTPUT"
+
+          git checkout -B "${SYNC_BRANCH}" origin/main
+          if ! git merge --no-ff upstream-main -m "chore(sync): merge upstream/main ($(date -u +'%Y-%m-%d'))"; then
+            git merge --abort || true
+            echo "merge_conflict=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git diff --quiet origin/main..HEAD; then
+            echo "no_changes=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BACKUP_TAG="backup/main-$(date -u +'%Y%m%d-%H%M')"
+          echo "backup_tag=${BACKUP_TAG}" >> "$GITHUB_OUTPUT"
+          git tag "${BACKUP_TAG}" origin/main
+          git push origin "${BACKUP_TAG}"
+          git push origin "${SYNC_BRANCH}" --force-with-lease
+
+      - name: Ensure sync labels exist
+        if: steps.merge_step.outputs.no_changes != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create sync-upstream --color 1D76DB --description "Automated upstream sync PR" || true
+          gh label create sync-conflict --color B60205 --description "Manual merge conflict resolution needed" || true
+
+      - name: Create conflict issue
+        if: steps.merge_step.outputs.merge_conflict == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ISSUE_ID="$(gh issue list --label sync-conflict --state open --json number --jq '.[0].number')"
+          if [ -n "${ISSUE_ID}" ]; then
+            gh issue comment "${ISSUE_ID}" --body "Another upstream conflict occurred on $(date -u +'%Y-%m-%d %H:%M UTC'). Follow the runbook in FORK_SYNC_RUNBOOK.md."
+            exit 0
+          fi
+          gh issue create \
+            --title "sync-conflict: upstream merge requires manual resolution" \
+            --label sync-conflict \
+            --body "Automated weekly sync hit a merge conflict on $(date -u +'%Y-%m-%d %H:%M UTC').\n\nUse the runbook in FORK_SYNC_RUNBOOK.md:\n1. Create \`sync/conflict-YYYYMMDD\` from \`main\`.\n2. Merge \`upstream-main\`.\n3. Prefer upstream changes first, then re-apply local extensions.\n4. Open PR to \`main\` and close this issue after merge."
+
+      - name: Create or update sync PR
+        if: steps.merge_step.outputs.merge_conflict != 'true' && steps.merge_step.outputs.no_changes != 'true'
+        id: pr_step
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SYNC_BRANCH="${{ steps.merge_step.outputs.sync_branch }}"
+          TITLE="chore(sync): merge upstream/main ($(date -u +'%Y-%m-%d'))"
+          BODY="Automated weekly upstream sync.\n\n- Source: \`upstream/main\`\n- Mirror branch: \`upstream-main\`\n- Backup tag: \`${{ steps.merge_step.outputs.backup_tag }}\`\n- Strategy: merge (no rebase/cherry-pick)"
+
+          PR_NUMBER="$(gh pr list --head "${SYNC_BRANCH}" --base main --state open --json number --jq '.[0].number')"
+          if [ -z "${PR_NUMBER}" ]; then
+            gh pr create --base main --head "${SYNC_BRANCH}" --title "${TITLE}" --body "${BODY}" --label sync-upstream
+            PR_NUMBER="$(gh pr list --head "${SYNC_BRANCH}" --base main --state open --json number --jq '.[0].number')"
+          else
+            gh pr edit "${PR_NUMBER}" --title "${TITLE}" --body "${BODY}" --add-label sync-upstream
+          fi
+
+          echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Enable auto-merge
+        if: steps.pr_step.outputs.pr_number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr merge "${{ steps.pr_step.outputs.pr_number }}" --auto --merge
+
+      - name: Close stale conflict issues after successful PR
+        if: steps.pr_step.outputs.pr_number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for issue_id in $(gh issue list --label sync-conflict --state open --json number --jq '.[].number'); do
+            gh issue comment "${issue_id}" --body "Resolved by sync PR #${{ steps.pr_step.outputs.pr_number }}."
+            gh issue close "${issue_id}"
+          done
