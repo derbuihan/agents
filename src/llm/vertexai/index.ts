@@ -6,9 +6,11 @@ import type {
   GoogleAbstractedClient,
 } from '@langchain/google-common';
 import type { BaseMessage } from '@langchain/core/messages';
-import type { VertexAIClientOptions } from '@/types';
+import type { GoogleThinkingConfig, VertexAIClientOptions } from '@/types';
 
 class CustomChatConnection extends ChatConnection<VertexAIClientOptions> {
+  thinkingConfig?: GoogleThinkingConfig;
+
   async formatData(
     input: BaseMessage[],
     parameters: GoogleAIModelRequestParams
@@ -25,6 +27,15 @@ class CustomChatConnection extends ChatConnection<VertexAIClientOptions> {
         formattedData.generationConfig.thinkingConfig.includeThoughts = true;
       }
       delete formattedData.generationConfig.thinkingConfig.thinkingBudget;
+    }
+    if (this.thinkingConfig?.thinkingLevel) {
+      formattedData.generationConfig ??= {};
+      (
+        formattedData.generationConfig as Record<string, unknown>
+      ).thinkingConfig = {
+        ...formattedData.generationConfig.thinkingConfig,
+        thinkingLevel: this.thinkingConfig.thinkingLevel,
+      };
     }
     return formattedData;
   }
@@ -315,6 +326,7 @@ class CustomChatConnection extends ChatConnection<VertexAIClientOptions> {
 export class ChatVertexAI extends ChatGoogle {
   lc_namespace = ['langchain', 'chat_models', 'vertexai'];
   dynamicThinkingBudget = false;
+  thinkingConfig?: GoogleThinkingConfig;
 
   static lc_name(): 'LibreChatVertexAI' {
     return 'LibreChatVertexAI';
@@ -327,6 +339,7 @@ export class ChatVertexAI extends ChatGoogle {
       platformType: 'gcp',
     });
     this.dynamicThinkingBudget = dynamicThinkingBudget;
+    this.thinkingConfig = fields?.thinkingConfig;
   }
   invocationParams(
     options?: this['ParsedCallOptions'] | undefined
@@ -342,18 +355,22 @@ export class ChatVertexAI extends ChatGoogle {
     fields: VertexAIClientOptions,
     client: GoogleAbstractedClient
   ): void {
-    this.connection = new CustomChatConnection(
+    const connection = new CustomChatConnection(
       { ...fields, ...this },
       this.caller,
       client,
       false
     );
+    connection.thinkingConfig = this.thinkingConfig;
+    this.connection = connection;
 
-    this.streamedConnection = new CustomChatConnection(
+    const streamedConnection = new CustomChatConnection(
       { ...fields, ...this },
       this.caller,
       client,
       true
     );
+    streamedConnection.thinkingConfig = this.thinkingConfig;
+    this.streamedConnection = streamedConnection;
   }
 }
